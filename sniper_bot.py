@@ -1,74 +1,23 @@
 import os, time, requests
 from web3 import Web3
 from dotenv import load_dotenv
+from buy import buy_token
+from utils import check_honeypot, get_liquidity
 
-# ========== CONFIG ==========
-# .env values directly yaha paste karo ya .env file rakho aur load_dotenv() use karo
-BASE_RPC = "https://mainnet.base.org"
-WALLET_ADDRESS = "0xYourWalletAddress"
-PRIVATE_KEY = "your_private_key"
-TELEGRAM_TOKEN = "your_telegram_bot_token"
-TELEGRAM_CHAT_ID = "your_chat_id"
-UNISWAP_ROUTER = "0x2626664c2603336E57B271c5C0dCE69c6E7aA1D2"
-BUY_AMOUNT = 0.01   # ETH me
+load_dotenv()
 
-# ========== INIT ==========
+BASE_RPC = os.getenv("BASE_RPC")
+WALLET_ADDRESS = os.getenv("WALLET_ADDRESS")
+PRIVATE_KEY = os.getenv("PRIVATE_KEY")
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+
 w3 = Web3(Web3.HTTPProvider(BASE_RPC))
 telegram_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
 
-router_abi = '[{"inputs":[{"internalType":"address","name":"token","type":"address"},{"internalType":"uint256","name":"amountOutMin","type":"uint256"},{"internalType":"uint256","name":"amountInMax","type":"uint256"},{"internalType":"address","name":"to","type":"address"},{"internalType":"uint256","name":"deadline","type":"uint256"}],"name":"exactInputSingle","outputs":[{"internalType":"uint256","name":"","type":"uint256"}],"stateMutability":"payable","type":"function"}]'
-router = w3.eth.contract(address=UNISWAP_ROUTER, abi=router_abi)
-
-# ========== UTILS ==========
 def send_telegram(msg):
-    try:
-        requests.post(telegram_url, data={"chat_id": TELEGRAM_CHAT_ID, "text": msg})
-    except Exception as e:
-        print("Telegram Error:", e)
+    requests.post(telegram_url, data={"chat_id": TELEGRAM_CHAT_ID, "text": msg})
 
-def check_honeypot(token_address):
-    try:
-        token_abi = [
-            {"constant": False, "inputs": [{"name": "_to", "type": "address"}, {"name": "_value", "type": "uint256"}], 
-             "name": "transfer", "outputs": [{"name": "", "type": "bool"}], "type": "function"}
-        ]
-        token = w3.eth.contract(address=token_address, abi=token_abi)
-        token.functions.transfer(WALLET_ADDRESS, 1).estimate_gas({'from': WALLET_ADDRESS})
-        return True
-    except:
-        return False
-
-def get_liquidity(token_address):
-    url = "https://api.thegraph.com/subgraphs/name/uniswap/uniswap-v3"
-    query = """
-    {
-      pools(first:1, where: {token0: "%s"}) {
-        totalValueLockedETH
-      }
-    }
-    """ % token_address.lower()
-    try:
-        res = requests.post(url, json={"query": query})
-        eth_liq = float(res.json()['data']['pools'][0]['totalValueLockedETH'])
-        return eth_liq
-    except:
-        return 0.0
-
-def buy_token(token_address):
-    amount = w3.to_wei(BUY_AMOUNT, 'ether')
-    tx = router.functions.exactInputSingle(token_address, 0, amount, WALLET_ADDRESS, (w3.eth.get_block('latest').timestamp + 60)).build_transaction({
-        'from': WALLET_ADDRESS,
-        'value': amount,
-        'gas': 300000,
-        'gasPrice': w3.eth.gas_price,
-        'nonce': w3.eth.get_transaction_count(WALLET_ADDRESS)
-    })
-    signed_tx = w3.eth.account.sign_transaction(tx, PRIVATE_KEY)
-    tx_hash = w3.eth.send_raw_transaction(signed_tx.rawTransaction)
-    print(f"Bought token: {token_address}, tx: {tx_hash.hex()}")
-    send_telegram(f"✅ Bought token: {token_address}\nTx: {tx_hash.hex()}")
-
-# ========== MAIN LOOP ==========
 def detect_new_tokens():
     latest_block = w3.eth.block_number
     print(f"Starting from block: {latest_block}")
@@ -89,24 +38,27 @@ def detect_new_tokens():
                     name = token_contract.functions.name().call()
                     decimals = token_contract.functions.decimals().call()
 
-                    # Filters
-                    if not check_honeypot(address):
-                        send_telegram(f"⚠ Honeypot Token Skipped: {address}")
-                        continue
+                    # Honeypot check
+                    safe = check_honeypot(w3, address, WALLET_ADDRESS)
+                    # Liquidity check
                     liquidity = get_liquidity(address)
+
+                    if not safe:
+                        send_telegram(f"⚠ Honeypot Detected, Skipping!\n{address}")
+                        continue
                     if liquidity < 5:
-                        send_telegram(f"⚠ Low Liquidity (<5 ETH) Token Skipped: {address}")
+                        send_telegram(f"⚠ Low Liquidity (<5 ETH), Skipping!\n{address}")
                         continue
 
                     msg = f"New Safe Token:\nName: {name}\nSymbol: {symbol}\nDecimals: {decimals}\nAddress: {address}\nLiquidity: {liquidity} ETH"
                     print(msg)
                     send_telegram(msg)
 
-                    # Auto Buy
+                    # Auto-buy
                     buy_token(address)
 
                 except Exception as e:
-                    print(f"Error reading token: {e}")
+                    print(f"Not ERC20 or error: {e}")
         time.sleep(2)
 
 if __name__ == "__main__":
