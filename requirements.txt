@@ -1,0 +1,5 @@
+web3
+requests
+python-telegram-bot
+python-dotenv
+eth_abi
